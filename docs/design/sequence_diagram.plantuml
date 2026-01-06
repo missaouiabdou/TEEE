@@ -1,0 +1,607 @@
+@startuml
+
+' Styling
+skinparam sequenceMessageAlign center
+skinparam responseMessageBelowArrow true
+
+actor User
+participant "API Gateway" as Gateway
+participant "Nginx" as Nginx
+participant "AuthController" as Controller
+participant "RateLimiter" as Limiter
+participant "RegistrationService" as RegService
+participant "UserRepository" as UserRepo
+participant "OutboxRepository" as OutboxRepo
+participant "EntityManager" as EM
+participant "TokenService" as TokenSvc
+participant "OutboxProcessor" as Processor
+participant "CircuitBreaker" as CB
+participant "MessagePublisher" as Publisher
+participant "RabbitMQ" as MQ
+participant "CRM Service" as CRM
+participant "ERP Service" as ERP
+
+== User Registration Flow ==
+
+User -> Gateway: POST /api/register
+    note right
+        Input: {
+            "email": "user@example.com",
+            "password": "SecurePass123!",
+            "name": "John Doe"
+        }
+    end note
+
+Gateway -> Nginx: Forward Request with CORS headers
+Nginx -> Controller: POST /api/register
+
+Controller -> Limiter: attempt("register:192.168.1.1")
+Limiter -> Limiter: Check cache for key
+Limiter --> Controller: true (allowed)
+
+Controller -> Controller: Validate Request
+    note right
+        Validation Rules:
+        - Email: valid format, max 255 chars
+        - Password: min 8 chars, contains uppercase,
+          lowercase, number, special char
+        - Name: min 2 chars, max 255 chars
+    end note
+
+Controller -> RegService: register(RegisterUserDTO)
+    note right
+        Input: RegisterUserDTO {
+            email: "user@example.com",
+            password: "SecurePass123!",
+            name: "John Doe"
+        }
+    end note
+
+RegService -> RegService: Validate DTO
+RegService -> UserRepo: existsByEmail(Email::fromString("user@example.com"))
+UserRepo -> EM: createQuery("SELECT COUNT(u) FROM User u WHERE u.email = :email")
+EM --> UserRepo: 0
+UserRepo --> RegService: false
+
+RegService -> EM: beginTransaction()
+EM --> RegService: Transaction started
+
+RegService -> RegService: Create User Entity
+    note right
+        User Entity Creation:
+        - id: UserId::generate() // UUID v4
+        - email: Email::fromString("user@example.com")
+        - password: Password::fromPlain("SecurePass123!")
+          // Uses password_hash with BCRYPT
+        - name: "John Doe"
+        - roles: ["ROLE_USER"]
+        - createdAt: new DateTimeImmutable()
+        - updatedAt: new DateTimeImmutable()
+    end note
+
+RegService -> UserRepo: save(User)
+UserRepo -> EM: persist(User)
+EM --> UserRepo: void
+UserRepo --> RegService: void
+
+RegService -> RegService: Create UserCreatedEvent
+    note right
+        UserCreatedEvent {
+            userId: user.getId().getValue(),
+            email: user.getEmail().getValue(),
+            name: user.getName(),
+            roles: user.getRoles(),
+            occurredAt: new DateTimeImmutable()
+        }
+    end note
+
+RegService -> RegService: Create OutboxEvent
+    note right
+        OutboxEvent {
+            id: uuid_v4(),
+            aggregateId: user.getId().getValue(),
+            aggregateType: "User",
+            eventType: "UserCreated",
+            payload: userCreatedEvent.toArray(),
+            occurredAt: new DateTimeImmutable(),
+            status: OutboxStatus::PENDING,
+            retryCount: 0
+        }
+    end note
+
+RegService -> OutboxRepo: save(OutboxEvent)
+OutboxRepo -> EM: persist(OutboxEvent)
+EM --> OutboxRepo: void
+OutboxRepo --> RegService: void
+
+RegService -> EM: flush()
+EM -> EM: Execute SQL INSERT for User
+EM -> EM: Execute SQL INSERT for OutboxEvent
+EM --> RegService: void
+
+RegService -> EM: commit()
+EM --> RegService: Transaction committed
+    note right
+        Atomic transaction ensures:
+        - User is saved to database
+        - OutboxEvent is saved to database
+        - Or both operations fail together
+        This guarantees eventual consistency
+    end note
+
+RegService -> TokenSvc: createToken(User)
+TokenSvc -> TokenSvc: generateAccessToken(User)
+    note right
+        JWT Payload: {
+            "sub": user.getId().getValue(),
+            "email": user.getEmail().getValue(),
+            "roles": user.getRoles(),
+            "iat": current_timestamp,
+            "exp": current_timestamp + 900,
+            "iss": "auth-service"
+        }
+        Signed with RS256 using private key
+    end note
+
+TokenSvc -> TokenSvc: generateRefreshToken(User)
+    note right
+        Refresh Token:
+        - Random 64-byte string
+        - Stored in database with user reference
+        - TTL: 7 days
+    end note
+
+TokenSvc --> RegService: TokenDTO
+    note right
+        TokenDTO {
+            accessToken: "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...",
+            refreshToken: "def50200a1b2c3d4e5f6...",
+            expiresIn: 900,
+            tokenType: "Bearer"
+        }
+    end note
+
+RegService --> Controller: User + TokenDTO
+
+Controller -> Controller: Build Response
+Controller --> Nginx: 201 Created
+    note right
+        Response Headers:
+        - Content-Type: application/json
+        - X-RateLimit-Limit: 5
+        - X-RateLimit-Remaining: 4
+        
+        Response Body: {
+            "user": {
+                "id": "550e8400-e29b-41d4-a716-446655440000",
+                "email": "user@example.com",
+                "name": "John Doe",
+                "roles": ["ROLE_USER"],
+                "createdAt": "2024-01-05T10:30:00+00:00"
+            },
+            "token": {
+                "accessToken": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...",
+                "refreshToken": "def50200a1b2c3d4e5f6...",
+                "expiresIn": 900,
+                "tokenType": "Bearer"
+            }
+        }
+    end note
+
+Nginx --> Gateway: Response
+Gateway --> User: 201 Created with Token
+
+== Asynchronous Outbox Processing (Scheduled Task) ==
+
+Processor -> Processor: Cron job triggers every 10 seconds
+Processor -> OutboxRepo: findPendingEvents(limit: 100)
+OutboxRepo -> EM: createQuery("SELECT o FROM OutboxEvent o WHERE o.status = :status ORDER BY o.occurredAt ASC")
+EM --> OutboxRepo: List<OutboxEvent>
+OutboxRepo --> Processor: List<OutboxEvent>
+
+loop For each OutboxEvent
+    Processor -> CB: call(publishEvent)
+    
+    CB -> CB: Check circuit state
+    
+    alt Circuit is CLOSED or HALF_OPEN
+        CB -> Publisher: publish(UserCreatedEvent)
+        Publisher -> MQ: publish to exchange "events"
+            note right
+                Message Properties:
+                - routing_key: "user.created"
+                - content_type: "application/json"
+                - delivery_mode: 2 (persistent)
+                - message_id: event.id
+                
+                Message Body: {
+                    "eventType": "UserCreated",
+                    "userId": "550e8400-e29b-41d4-a716-446655440000",
+                    "email": "user@example.com",
+                    "name": "John Doe",
+                    "roles": ["ROLE_USER"],
+                    "occurredAt": "2024-01-05T10:30:00+00:00"
+                }
+            end note
+        
+        MQ --> Publisher: ACK
+        Publisher --> CB: Success
+        
+        CB -> CB: recordSuccess()
+        CB --> Processor: Success
+        
+        Processor -> OutboxRepo: markAsProcessed(OutboxEvent)
+        OutboxRepo -> EM: Update outbox_events SET status = 'PROCESSED', processed_at = NOW()
+        EM --> OutboxRepo: void
+        OutboxRepo --> Processor: void
+        
+        ' Async consumption by other services
+        MQ -> CRM: Consume UserCreated message
+        CRM -> CRM: Create customer record
+        CRM --> MQ: ACK
+        
+        MQ -> ERP: Consume UserCreated message
+        ERP -> ERP: Create employee record
+        ERP --> MQ: ACK
+        
+    else Circuit is OPEN
+        CB --> Processor: CircuitOpenException
+        Processor -> Processor: Log warning and skip
+            note right
+                Circuit is open, will retry later
+                when circuit transitions to HALF_OPEN
+            end note
+    else Publishing fails
+        Publisher --> CB: Exception
+        CB -> CB: recordFailure()
+        CB -> CB: Check if threshold reached
+        
+        alt Failure threshold reached
+            CB -> CB: Open circuit
+                note right
+                    Circuit opened after 5 consecutive failures
+                    Will attempt HALF_OPEN after 60 seconds
+                end note
+        end
+        
+        CB --> Processor: Exception
+        Processor -> Processor: incrementRetryCount()
+        
+        alt Retry count < maxRetries (3)
+            Processor -> OutboxRepo: Update retry count
+            OutboxRepo -> EM: Update outbox_events SET retry_count = retry_count + 1, last_error = :error
+            EM --> OutboxRepo: void
+            OutboxRepo --> Processor: void
+        else Retry count >= maxRetries
+            Processor -> OutboxRepo: markAsFailed(OutboxEvent, error)
+            OutboxRepo -> EM: Update outbox_events SET status = 'FAILED', last_error = :error
+            EM --> OutboxRepo: void
+            OutboxRepo --> Processor: void
+            Processor -> Processor: Log error and send alert
+                note right
+                    Failed event requires manual intervention
+                    Alert sent to monitoring system
+                end note
+        end
+    end
+end
+
+== User Authentication Flow ==
+
+User -> Gateway: POST /api/login
+    note right
+        Input: {
+            "email": "user@example.com",
+            "password": "SecurePass123!"
+        }
+    end note
+
+Gateway -> Nginx: Forward Request
+Nginx -> Controller: POST /api/login
+
+Controller -> Controller: Extract client IP and User-Agent
+Controller -> Limiter: attempt("login:user@example.com")
+Limiter -> Limiter: Check attempts in cache
+Limiter --> Controller: true (allowed)
+
+Controller -> Controller: Validate Request
+    note right
+        Validation:
+        - Email: required, valid format
+        - Password: required, min 8 chars
+    end note
+
+Controller -> RegService: authenticate(AuthenticationDTO, ipAddress, userAgent)
+    note right
+        Input: AuthenticationDTO {
+            email: "user@example.com",
+            password: "SecurePass123!"
+        }
+        ipAddress: "192.168.1.1"
+        userAgent: "Mozilla/5.0..."
+    end note
+
+RegService -> UserRepo: findByEmail(Email::fromString("user@example.com"))
+UserRepo -> EM: createQuery("SELECT u FROM User u WHERE u.email = :email AND u.deletedAt IS NULL")
+EM --> UserRepo: User entity
+UserRepo --> RegService: User
+
+RegService -> RegService: verifyPassword(password)
+    note right
+        Uses password_verify() to compare:
+        - Plain password: "SecurePass123!"
+        - Hashed password from database
+    end note
+
+alt Password Valid
+    RegService -> TokenSvc: createToken(User)
+    TokenSvc -> TokenSvc: generateAccessToken(User)
+    TokenSvc -> TokenSvc: generateRefreshToken(User)
+    TokenSvc -> EM: persist(RefreshToken)
+    EM --> TokenSvc: void
+    TokenSvc --> RegService: TokenDTO
+    
+    RegService -> RegService: dispatchAuthenticationEvent()
+        note right
+            UserAuthenticatedEvent {
+                userId: user.getId().getValue(),
+                email: user.getEmail().getValue(),
+                ipAddress: "192.168.1.1",
+                userAgent: "Mozilla/5.0...",
+                occurredAt: new DateTimeImmutable()
+            }
+            This event can be used for:
+            - Audit logging
+            - Security monitoring
+            - Analytics
+        end note
+    
+    RegService --> Controller: TokenDTO
+    Controller -> Limiter: clear("login:user@example.com")
+    Limiter --> Controller: void
+    
+    Controller --> Nginx: 200 OK
+        note right
+            Response: {
+                "accessToken": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...",
+                "refreshToken": "def50200a1b2c3d4e5f6...",
+                "expiresIn": 900,
+                "tokenType": "Bearer"
+            }
+        end note
+else Password Invalid
+    RegService --> Controller: AuthenticationException("Invalid credentials")
+    Controller -> Limiter: hit("login:user@example.com")
+    Limiter --> Controller: attempts count
+    
+    alt Too many attempts
+        Controller --> Nginx: 429 Too Many Requests
+            note right
+                Response: {
+                    "error": "Too many login attempts",
+                    "retryAfter": 900
+                }
+            end note
+    else Attempts within limit
+        Controller --> Nginx: 401 Unauthorized
+            note right
+                Response: {
+                    "error": "Invalid credentials"
+                }
+            end note
+    end
+end
+
+Nginx --> Gateway: Response
+Gateway --> User: Response
+
+== Token Refresh Flow ==
+
+User -> Gateway: POST /api/token/refresh
+    note right
+        Input: {
+            "refreshToken": "def50200a1b2c3d4e5f6..."
+        }
+    end note
+
+Gateway -> Nginx: Forward Request
+Nginx -> Controller: POST /api/token/refresh
+
+Controller -> TokenSvc: refreshToken(refreshToken)
+
+TokenSvc -> EM: Find RefreshToken entity
+EM --> TokenSvc: RefreshToken entity
+
+alt Token exists and valid
+    TokenSvc -> TokenSvc: Check expiration
+        note right
+            Validate:
+            - Token not expired (validUntil > now)
+            - Token not revoked
+        end note
+    
+    TokenSvc -> UserRepo: findByEmail(Email::fromString(refreshToken.username))
+    UserRepo -> EM: Query User
+    EM --> UserRepo: User
+    UserRepo --> TokenSvc: User
+    
+    TokenSvc -> TokenSvc: generateAccessToken(User)
+    TokenSvc -> TokenSvc: generateRefreshToken(User)
+        note right
+            Refresh Token Rotation:
+            - Old refresh token is invalidated
+            - New refresh token is generated
+            - Improves security by limiting token lifetime
+        end note
+    
+    TokenSvc -> EM: persist(new RefreshToken)
+    TokenSvc -> EM: remove(old RefreshToken)
+    EM --> TokenSvc: void
+    
+    TokenSvc --> Controller: TokenDTO
+        note right
+            TokenDTO {
+                accessToken: "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...",
+                refreshToken: "ghi78900xyz...",
+                expiresIn: 900,
+                tokenType: "Bearer"
+            }
+        end note
+    
+    Controller --> Nginx: 200 OK
+else Token invalid or expired
+    TokenSvc --> Controller: InvalidTokenException
+    Controller --> Nginx: 401 Unauthorized
+        note right
+            Response: {
+                "error": "Invalid or expired refresh token"
+            }
+        end note
+end
+
+Nginx --> Gateway: Response
+Gateway --> User: Response
+
+== Gateway Token Validation (Stateless) ==
+
+User -> Gateway: GET /api/crm/customers
+    note right
+        Headers: {
+            "Authorization": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9..."
+        }
+    end note
+
+Gateway -> Gateway: Extract JWT from Authorization header
+Gateway -> Gateway: Load Public RSA Key from config
+Gateway -> Gateway: Validate Token Signature
+    note right
+        Validation Steps:
+        1. Decode JWT header and payload
+        2. Verify RS256 signature using public key
+        3. Check token expiration (exp claim)
+        4. Validate issuer (iss claim)
+        5. Validate audience if configured (aud claim)
+        
+        No database call needed - Stateless!
+    end note
+
+alt Token Valid
+    Gateway -> Gateway: Extract User Claims
+        note right
+            Claims extracted: {
+                "sub": "550e8400-e29b-41d4-a716-446655440000",
+                "email": "user@example.com",
+                "roles": ["ROLE_USER"],
+                "iat": 1704451200,
+                "exp": 1704452100,
+                "iss": "auth-service"
+            }
+        end note
+    
+    Gateway -> CRM: Forward Request with User Context
+        note right
+            Headers added by Gateway:
+            - X-User-Id: "550e8400-e29b-41d4-a716-446655440000"
+            - X-User-Email: "user@example.com"
+            - X-User-Roles: "ROLE_USER"
+            - X-Request-Id: "correlation-id-123"
+            
+            Original Authorization header removed
+            for security (downstream services don't
+            need the JWT)
+        end note
+    
+    CRM -> CRM: Process request using user context
+    CRM --> Gateway: Response
+    Gateway --> User: Response
+else Token Invalid
+    Gateway --> User: 401 Unauthorized
+        note right
+            Response: {
+                "error": "Invalid or expired token",
+                "code": "TOKEN_INVALID"
+            }
+        end note
+end
+
+== Change Password Flow ==
+
+User -> Gateway: POST /api/password/change
+    note right
+        Headers: {
+            "Authorization": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9..."
+        }
+        Input: {
+            "currentPassword": "SecurePass123!",
+            "newPassword": "NewSecurePass456!"
+        }
+    end note
+
+Gateway -> Gateway: Validate JWT token
+Gateway -> Nginx: Forward Request with User Context
+Nginx -> Controller: POST /api/password/change
+
+Controller -> Controller: Extract User ID from JWT claims
+Controller -> RegService: changePassword(UserId, ChangePasswordDTO)
+    note right
+        Input: ChangePasswordDTO {
+            currentPassword: "SecurePass123!",
+            newPassword: "NewSecurePass456!"
+        }
+    end note
+
+RegService -> UserRepo: findById(UserId)
+UserRepo -> EM: Query User
+EM --> UserRepo: User
+UserRepo --> RegService: User
+
+RegService -> RegService: verifyPassword(currentPassword)
+
+alt Current Password Valid
+    RegService -> RegService: Create new Password VO
+        note right
+            Password::fromPlain("NewSecurePass456!")
+            - Validates password strength
+            - Hashes with BCRYPT
+        end note
+    
+    RegService -> RegService: user.changePassword(newPassword)
+    RegService -> UserRepo: save(User)
+    UserRepo -> EM: flush()
+    EM --> UserRepo: void
+    UserRepo --> RegService: void
+    
+    RegService -> TokenSvc: revokeAllRefreshTokens(User)
+        note right
+            Security measure:
+            - Invalidate all existing refresh tokens
+            - Force re-authentication on all devices
+            - User must login again with new password
+        end note
+    
+    TokenSvc -> EM: Delete all RefreshTokens for user
+    EM --> TokenSvc: void
+    TokenSvc --> RegService: void
+    
+    RegService --> Controller: void
+    Controller --> Nginx: 200 OK
+        note right
+            Response: {
+                "message": "Password changed successfully",
+                "requiresReauthentication": true
+            }
+        end note
+else Current Password Invalid
+    RegService --> Controller: InvalidPasswordException
+    Controller --> Nginx: 400 Bad Request
+        note right
+            Response: {
+                "error": "Current password is incorrect"
+            }
+        end note
+end
+
+Nginx --> Gateway: Response
+Gateway --> User: Response
+
+@enduml

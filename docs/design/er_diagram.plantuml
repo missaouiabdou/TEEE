@@ -1,0 +1,195 @@
+@startuml
+
+' Styling
+skinparam linetype ortho
+skinparam backgroundColor #FFFFFF
+
+entity "users" as users {
+    * **id** : uuid <<PK>>
+    --
+    * **email** : varchar(255) <<UK>>
+    * **password** : varchar(255)
+    * **name** : varchar(255)
+    * **roles** : json
+    * **created_at** : timestamp
+    * **updated_at** : timestamp
+    **deleted_at** : timestamp <<nullable>>
+    --
+    Indexes:
+    - UNIQUE idx_users_email (email)
+    - INDEX idx_users_deleted_at (deleted_at)
+}
+
+entity "outbox_events" as outbox {
+    * **id** : uuid <<PK>>
+    --
+    * **aggregate_id** : varchar(255)
+    * **aggregate_type** : varchar(100)
+    * **event_type** : varchar(100)
+    * **payload** : jsonb
+    * **occurred_at** : timestamp
+    **processed_at** : timestamp <<nullable>>
+    * **status** : varchar(20)
+    * **retry_count** : integer
+    **last_error** : text <<nullable>>
+    --
+    Indexes:
+    - INDEX idx_outbox_status_occurred (status, occurred_at)
+    - INDEX idx_outbox_aggregate (aggregate_id, aggregate_type)
+    - INDEX idx_outbox_event_type (event_type)
+    - INDEX idx_outbox_processed_at (processed_at)
+    --
+    Check Constraints:
+    - status IN ('PENDING', 'PROCESSED', 'FAILED')
+    - retry_count >= 0
+}
+
+entity "refresh_tokens" as refresh {
+    * **id** : uuid <<PK>>
+    --
+    * **refresh_token** : varchar(255) <<UK>>
+    * **username** : varchar(255) <<FK>>
+    * **valid_until** : timestamp
+    * **created_at** : timestamp
+    --
+    Indexes:
+    - UNIQUE idx_refresh_token (refresh_token)
+    - INDEX idx_refresh_username (username)
+    - INDEX idx_refresh_valid_until (valid_until)
+}
+
+entity "rate_limit_attempts" as rate_limit {
+    * **id** : uuid <<PK>>
+    --
+    * **key** : varchar(255) <<UK>>
+    * **attempts** : integer
+    * **reset_at** : timestamp
+    * **created_at** : timestamp
+    --
+    Indexes:
+    - UNIQUE idx_rate_limit_key (key)
+    - INDEX idx_rate_limit_reset_at (reset_at)
+    --
+    Check Constraints:
+    - attempts >= 0
+}
+
+entity "circuit_breaker_state" as circuit {
+    * **id** : uuid <<PK>>
+    --
+    * **service_name** : varchar(100) <<UK>>
+    * **state** : varchar(20)
+    * **failure_count** : integer
+    **last_failure_at** : timestamp <<nullable>>
+    **opened_at** : timestamp <<nullable>>
+    * **updated_at** : timestamp
+    --
+    Indexes:
+    - UNIQUE idx_circuit_service_name (service_name)
+    - INDEX idx_circuit_state (state)
+    --
+    Check Constraints:
+    - state IN ('CLOSED', 'OPEN', 'HALF_OPEN')
+    - failure_count >= 0
+}
+
+entity "password_reset_tokens" as password_reset {
+    * **id** : uuid <<PK>>
+    --
+    * **token** : varchar(255) <<UK>>
+    * **user_id** : uuid <<FK>>
+    * **expires_at** : timestamp
+    * **used_at** : timestamp <<nullable>>
+    * **created_at** : timestamp
+    --
+    Indexes:
+    - UNIQUE idx_password_reset_token (token)
+    - INDEX idx_password_reset_user_id (user_id)
+    - INDEX idx_password_reset_expires_at (expires_at)
+}
+
+entity "audit_logs" as audit {
+    * **id** : uuid <<PK>>
+    --
+    * **user_id** : uuid <<FK>>
+    * **event_type** : varchar(100)
+    * **ip_address** : varchar(45)
+    * **user_agent** : text
+    * **request_data** : jsonb
+    * **response_status** : integer
+    * **created_at** : timestamp
+    --
+    Indexes:
+    - INDEX idx_audit_user_id (user_id)
+    - INDEX idx_audit_event_type (event_type)
+    - INDEX idx_audit_created_at (created_at)
+    - INDEX idx_audit_ip_address (ip_address)
+}
+
+' Relationships
+users ||--o{ refresh : "refresh.username -> users.email"
+users ||--o{ password_reset : "password_reset.user_id -> users.id"
+users ||--o{ audit : "audit.user_id -> users.id"
+users ||--o{ outbox : "outbox.aggregate_id -> users.id (when aggregate_type='User')"
+
+' Notes
+note right of users
+    **User Entity**
+    - Primary authentication entity
+    - Soft delete supported (deleted_at)
+    - Roles stored as JSON array
+    - Password hashed with BCRYPT
+    - Email must be unique and valid
+end note
+
+note right of outbox
+    **Outbox Pattern**
+    - Ensures reliable event publishing
+    - Processed asynchronously
+    - Supports retry mechanism
+    - Failed events require manual intervention
+    - Cleanup job removes old processed events
+end note
+
+note right of refresh
+    **Refresh Tokens**
+    - Used for token rotation
+    - Automatically cleaned up on expiration
+    - Revoked on password change
+    - One-time use (deleted after refresh)
+end note
+
+note right of rate_limit
+    **Rate Limiting**
+    - Prevents brute force attacks
+    - Key format: "action:identifier"
+    - Examples: "login:email", "register:ip"
+    - Automatically resets after decay period
+end note
+
+note right of circuit
+    **Circuit Breaker**
+    - Prevents cascading failures
+    - Tracks external service health
+    - Auto-recovery with half-open state
+    - Configurable thresholds per service
+end note
+
+note right of password_reset
+    **Password Reset**
+    - Secure token-based reset
+    - Single-use tokens
+    - Time-limited (typically 1 hour)
+    - Invalidated on password change
+end note
+
+note right of audit
+    **Audit Logging**
+    - Tracks all authentication events
+    - Supports security monitoring
+    - Includes IP and user agent
+    - Retention policy configurable
+    - Used for compliance and forensics
+end note
+
+@enduml

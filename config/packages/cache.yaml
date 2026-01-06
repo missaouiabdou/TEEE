@@ -1,0 +1,13 @@
+framework:
+    cache:
+        app: cache.adapter.redis
+        default_redis_provider: '%env(REDIS_URL)%'
+
+        pools:
+            cache.rate_limiter:
+                adapter: cache.adapter.redis
+                default_lifetime: 900
+
+            cache.circuit_breaker:
+                adapter: cache.adapter.redis
+                default_lifetime: 3600

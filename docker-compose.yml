@@ -1,0 +1,91 @@
+version: '3.8'
+
+services:
+  php:
+    build:
+      context: .
+      dockerfile: docker/php/Dockerfile
+      target: production
+    container_name: auth-service-php
+    restart: unless-stopped
+    working_dir: /var/www
+    volumes:
+      - ./:/var/www
+      - ./var/jwt:/var/www/var/jwt
+    environment:
+      - APP_ENV=${APP_ENV:-prod}
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-auth_user}:${POSTGRES_PASSWORD:-auth_pass}@postgres:5432/${POSTGRES_DB:-auth_db}?serverVersion=16&charset=utf8
+      - MESSENGER_TRANSPORT_DSN=amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASSWORD:-guest}@rabbitmq:5672/%2f/messages
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - postgres
+      - rabbitmq
+      - redis
+    networks:
+      - auth-network
+
+  nginx:
+    build:
+      context: ./docker/nginx
+      dockerfile: Dockerfile
+    container_name: auth-service-nginx
+    restart: unless-stopped
+    ports:
+      - "${NGINX_PORT:-8080}:80"
+    volumes:
+      - ./public:/var/www/public:ro
+    depends_on:
+      - php
+    networks:
+      - auth-network
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: auth-service-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB:-auth_db}
+      - POSTGRES_USER=${POSTGRES_USER:-auth_user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-auth_pass}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - auth-network
+
+  rabbitmq:
+    image: rabbitmq:3.12-management-alpine
+    container_name: auth-service-rabbitmq
+    restart: unless-stopped
+    environment:
+      - RABBITMQ_DEFAULT_USER=${RABBITMQ_USER:-guest}
+      - RABBITMQ_DEFAULT_PASS=${RABBITMQ_PASSWORD:-guest}
+    ports:
+      - "${RABBITMQ_PORT:-5672}:5672"
+      - "${RABBITMQ_MANAGEMENT_PORT:-15672}:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - auth-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: auth-service-redis
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - auth-network
+
+networks:
+  auth-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  rabbitmq_data:
+  redis_data:

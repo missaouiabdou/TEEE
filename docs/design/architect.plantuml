@@ -1,0 +1,135 @@
+@startuml
+!define RECTANGLE class
+
+' Define color scheme
+skinparam backgroundColor #FFFFFF
+skinparam component {
+    BackgroundColor<<frontend>> #E3F2FD
+    BackgroundColor<<backend>> #FFF3E0
+    BackgroundColor<<database>> #F3E5F5
+    BackgroundColor<<messaging>> #E8F5E9
+    BackgroundColor<<external>> #FFEBEE
+    BorderColor #424242
+}
+
+package "Infrastructure Layer" {
+    [Docker Compose] as docker
+    [Nginx Gateway] as nginx <<frontend>>
+    [PHP-FPM 8.4] as php <<backend>>
+    [PostgreSQL 16] as postgres <<database>>
+    [RabbitMQ] as rabbitmq <<messaging>>
+}
+
+package "Presentation Layer" {
+    [AuthController] as controller <<backend>>
+    [ExceptionHandler] as exception <<backend>>
+    [RequestValidator] as validator <<backend>>
+    [CORS Middleware] as cors <<backend>>
+}
+
+package "Application Layer" {
+    [RegistrationService] as regService <<backend>>
+    [AuthenticationService] as authService <<backend>>
+    [TokenService] as tokenService <<backend>>
+    [OutboxProcessor] as outboxProc <<backend>>
+    [CircuitBreaker] as circuit <<backend>>
+    [RateLimiter] as limiter <<backend>>
+}
+
+package "Domain Layer" {
+    [User Entity] as user <<backend>>
+    [OutboxEvent Entity] as outbox <<backend>>
+    [UserCreated Event] as event <<backend>>
+    [Email VO] as email <<backend>>
+    [Password VO] as password <<backend>>
+    [IUserRepository] as userRepo <<backend>>
+    [IOutboxRepository] as outboxRepo <<backend>>
+}
+
+package "Infrastructure Layer - Persistence" {
+    [UserRepository] as userRepoImpl <<backend>>
+    [OutboxRepository] as outboxRepoImpl <<backend>>
+    [Doctrine ORM] as doctrine <<backend>>
+}
+
+package "Infrastructure Layer - Messaging" {
+    [MessagePublisher] as publisher <<backend>>
+    [Symfony Messenger] as messenger <<backend>>
+}
+
+package "External Services" {
+    [CRM Service] as crm <<external>>
+    [ERP Service] as erp <<external>>
+    [API Gateway] as gateway <<external>>
+}
+
+' Infrastructure connections
+docker --> nginx
+docker --> php
+docker --> postgres
+docker --> rabbitmq
+
+' Presentation to Application
+gateway --> nginx : HTTP/HTTPS
+nginx --> php : FastCGI
+php --> controller
+controller --> cors
+controller --> validator
+controller --> exception
+controller --> regService
+controller --> authService
+controller --> tokenService
+controller --> limiter
+
+' Application to Domain
+regService --> user
+regService --> outbox
+regService --> userRepo
+regService --> outboxRepo
+authService --> userRepo
+authService --> tokenService
+outboxProc --> outboxRepo
+outboxProc --> publisher
+outboxProc --> circuit
+
+' Domain to Infrastructure
+userRepo <|.. userRepoImpl
+outboxRepo <|.. outboxRepoImpl
+userRepoImpl --> doctrine
+outboxRepoImpl --> doctrine
+doctrine --> postgres
+
+' Messaging
+publisher --> messenger
+messenger --> rabbitmq
+rabbitmq --> crm : UserCreated Event
+rabbitmq --> erp : UserCreated Event
+
+' Notes
+note right of gateway
+    Validates JWT tokens using
+    Public RSA Key (stateless)
+    No database calls needed
+end note
+
+note right of outboxProc
+    Processes outbox events
+    with Circuit Breaker
+    for reliability
+end note
+
+note right of postgres
+    Stores:
+    - Users
+    - Outbox Events
+    - Refresh Tokens
+    - Rate Limit Data
+end note
+
+note right of rabbitmq
+    Event-driven architecture
+    for microservices
+    communication
+end note
+
+@enduml

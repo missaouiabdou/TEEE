@@ -1,0 +1,387 @@
+@startuml
+
+' Styling
+skinparam classAttributeIconSize 0
+skinparam class {
+    BackgroundColor<<ValueObject>> #E3F2FD
+    BackgroundColor<<Entity>> #FFF3E0
+    BackgroundColor<<Service>> #E8F5E9
+    BackgroundColor<<Repository>> #F3E5F5
+    BackgroundColor<<Controller>> #FFEBEE
+    BorderColor #424242
+}
+
+' Domain Layer - Value Objects
+class Email <<ValueObject>> {
+    - value: string
+    + __construct(string $email)
+    + getValue(): string
+    + equals(Email $other): bool
+    {static} + fromString(string $email): self
+    - validate(string $email): void
+}
+
+class Password <<ValueObject>> {
+    - hashedValue: string
+    + __construct(string $plainPassword)
+    + verify(string $plainPassword): bool
+    + getHash(): string
+    {static} + fromHash(string $hash): self
+    {static} + fromPlain(string $plainPassword): self
+    - hash(string $plainPassword): string
+}
+
+class UserId <<ValueObject>> {
+    - value: string
+    + __construct(?string $id = null)
+    + getValue(): string
+    + equals(UserId $other): bool
+    + __toString(): string
+    {static} + generate(): self
+    {static} + fromString(string $id): self
+}
+
+' Domain Layer - Entities
+class User <<Entity>> {
+    - id: UserId
+    - email: Email
+    - password: Password
+    - name: string
+    - roles: array<string>
+    - createdAt: DateTimeImmutable
+    - updatedAt: DateTimeImmutable
+    - deletedAt: ?DateTimeImmutable
+    + __construct(UserId $id, Email $email, Password $password, string $name, array $roles = ['ROLE_USER'])
+    + getId(): UserId
+    + getEmail(): Email
+    + getPassword(): Password
+    + getName(): string
+    + getRoles(): array<string>
+    + getCreatedAt(): DateTimeImmutable
+    + getUpdatedAt(): DateTimeImmutable
+    + verifyPassword(string $plainPassword): bool
+    + changePassword(Password $newPassword): void
+    + changeName(string $newName): void
+    + addRole(string $role): void
+    + removeRole(string $role): void
+    + hasRole(string $role): bool
+    + softDelete(): void
+    + isDeleted(): bool
+}
+
+class OutboxEvent <<Entity>> {
+    - id: string
+    - aggregateId: string
+    - aggregateType: string
+    - eventType: string
+    - payload: array<string, mixed>
+    - occurredAt: DateTimeImmutable
+    - processedAt: ?DateTimeImmutable
+    - status: OutboxStatus
+    - retryCount: int
+    - lastError: ?string
+    + __construct(string $aggregateId, string $aggregateType, string $eventType, array $payload)
+    + getId(): string
+    + getAggregateId(): string
+    + getAggregateType(): string
+    + getEventType(): string
+    + getPayload(): array
+    + getOccurredAt(): DateTimeImmutable
+    + getProcessedAt(): ?DateTimeImmutable
+    + getStatus(): OutboxStatus
+    + getRetryCount(): int
+    + getLastError(): ?string
+    + markAsProcessed(): void
+    + markAsFailed(string $error): void
+    + incrementRetryCount(): void
+    + isProcessed(): bool
+    + isPending(): bool
+    + canRetry(int $maxRetries = 3): bool
+}
+
+enum OutboxStatus {
+    PENDING
+    PROCESSED
+    FAILED
+}
+
+' Domain Layer - Events
+class UserCreatedEvent {
+    - userId: string
+    - email: string
+    - name: string
+    - roles: array<string>
+    - occurredAt: DateTimeImmutable
+    + __construct(string $userId, string $email, string $name, array $roles, DateTimeImmutable $occurredAt)
+    + getUserId(): string
+    + getEmail(): string
+    + getName(): string
+    + getRoles(): array<string>
+    + getOccurredAt(): DateTimeImmutable
+    + toArray(): array<string, mixed>
+    {static} + fromUser(User $user): self
+}
+
+class UserAuthenticatedEvent {
+    - userId: string
+    - email: string
+    - ipAddress: string
+    - userAgent: string
+    - occurredAt: DateTimeImmutable
+    + __construct(string $userId, string $email, string $ipAddress, string $userAgent)
+    + getUserId(): string
+    + getEmail(): string
+    + getIpAddress(): string
+    + getUserAgent(): string
+    + getOccurredAt(): DateTimeImmutable
+    + toArray(): array<string, mixed>
+}
+
+' Domain Layer - Repositories
+interface IUserRepository <<Repository>> {
+    + save(User $user): void
+    + findById(UserId $id): ?User
+    + findByEmail(Email $email): ?User
+    + existsByEmail(Email $email): bool
+    + delete(User $user): void
+}
+
+interface IOutboxRepository <<Repository>> {
+    + save(OutboxEvent $event): void
+    + findPendingEvents(int $limit = 100): array<OutboxEvent>
+    + markAsProcessed(OutboxEvent $event): void
+    + markAsFailed(OutboxEvent $event, string $error): void
+    + deleteProcessedEvents(DateTimeImmutable $before): int
+}
+
+' Application Layer - DTOs
+class RegisterUserDTO {
+    + readonly string email
+    + readonly string password
+    + readonly string name
+    + __construct(string $email, string $password, string $name)
+    + validate(): array<string>
+}
+
+class AuthenticationDTO {
+    + readonly string email
+    + readonly string password
+    + __construct(string $email, string $password)
+    + validate(): array<string>
+}
+
+class TokenDTO {
+    + readonly string accessToken
+    + readonly string refreshToken
+    + readonly int expiresIn
+    + readonly string tokenType
+    + __construct(string $accessToken, string $refreshToken, int $expiresIn, string $tokenType = 'Bearer')
+    + toArray(): array<string, mixed>
+}
+
+class ChangePasswordDTO {
+    + readonly string currentPassword
+    + readonly string newPassword
+    + __construct(string $currentPassword, string $newPassword)
+    + validate(): array<string>
+}
+
+' Application Layer - Services
+class RegistrationService <<Service>> {
+    - userRepository: IUserRepository
+    - outboxRepository: IOutboxRepository
+    - passwordHasher: PasswordHasherInterface
+    - entityManager: EntityManagerInterface
+    - validator: ValidatorInterface
+    + __construct(IUserRepository $userRepository, IOutboxRepository $outboxRepository, PasswordHasherInterface $passwordHasher, EntityManagerInterface $entityManager, ValidatorInterface $validator)
+    + register(RegisterUserDTO $dto): User
+    - validateUniqueEmail(Email $email): void
+    - createOutboxEvent(User $user): OutboxEvent
+}
+
+class AuthenticationService <<Service>> {
+    - userRepository: IUserRepository
+    - tokenService: TokenService
+    - passwordHasher: PasswordHasherInterface
+    - eventDispatcher: EventDispatcherInterface
+    + __construct(IUserRepository $userRepository, TokenService $tokenService, PasswordHasherInterface $passwordHasher, EventDispatcherInterface $eventDispatcher)
+    + authenticate(AuthenticationDTO $dto, string $ipAddress, string $userAgent): TokenDTO
+    + changePassword(UserId $userId, ChangePasswordDTO $dto): void
+    - dispatchAuthenticationEvent(User $user, string $ipAddress, string $userAgent): void
+}
+
+class TokenService <<Service>> {
+    - jwtManager: JWTTokenManagerInterface
+    - refreshTokenManager: RefreshTokenManagerInterface
+    - userRepository: IUserRepository
+    - accessTokenTtl: int
+    - refreshTokenTtl: int
+    + __construct(JWTTokenManagerInterface $jwtManager, RefreshTokenManagerInterface $refreshTokenManager, IUserRepository $userRepository, int $accessTokenTtl = 900, int $refreshTokenTtl = 604800)
+    + createToken(User $user): TokenDTO
+    + refreshToken(string $refreshToken): TokenDTO
+    + validateToken(string $token): array<string, mixed>
+    + revokeRefreshToken(string $refreshToken): void
+    - generateAccessToken(User $user): string
+    - generateRefreshToken(User $user): string
+}
+
+class OutboxProcessor <<Service>> {
+    - outboxRepository: IOutboxRepository
+    - messageBus: MessageBusInterface
+    - circuitBreaker: CircuitBreaker
+    - logger: LoggerInterface
+    - maxRetries: int
+    + __construct(IOutboxRepository $outboxRepository, MessageBusInterface $messageBus, CircuitBreaker $circuitBreaker, LoggerInterface $logger, int $maxRetries = 3)
+    + processEvents(): void
+    - processEvent(OutboxEvent $event): void
+    - createEventFromOutbox(OutboxEvent $outboxEvent): object
+}
+
+' Reliability Patterns
+class CircuitBreaker <<Service>> {
+    - cache: CacheInterface
+    - failureThreshold: int
+    - timeout: int
+    - serviceName: string
+    + __construct(CacheInterface $cache, string $serviceName, int $failureThreshold = 5, int $timeout = 60)
+    + call(callable $operation): mixed
+    + isOpen(): bool
+    + isHalfOpen(): bool
+    + isClosed(): bool
+    + reset(): void
+    + recordSuccess(): void
+    + recordFailure(): void
+    - getState(): CircuitState
+    - setState(CircuitState $state): void
+    - getFailureCount(): int
+    - incrementFailureCount(): void
+    - resetFailureCount(): void
+    - getLastFailureTime(): ?int
+    - setLastFailureTime(int $timestamp): void
+}
+
+enum CircuitState {
+    CLOSED
+    OPEN
+    HALF_OPEN
+}
+
+class RateLimiter <<Service>> {
+    - cache: CacheInterface
+    - maxAttempts: int
+    - decayMinutes: int
+    + __construct(CacheInterface $cache, int $maxAttempts = 5, int $decayMinutes = 15)
+    + attempt(string $key): bool
+    + tooManyAttempts(string $key): bool
+    + availableIn(string $key): int
+    + clear(string $key): void
+    + hit(string $key, int $decayMinutes = null): int
+    + attempts(string $key): int
+    + resetAttempts(string $key): void
+    - resolveKey(string $key): string
+}
+
+' Infrastructure Layer - Persistence
+class UserRepository <<Repository>> {
+    - entityManager: EntityManagerInterface
+    + __construct(EntityManagerInterface $entityManager)
+    + save(User $user): void
+    + findById(UserId $id): ?User
+    + findByEmail(Email $email): ?User
+    + existsByEmail(Email $email): bool
+    + delete(User $user): void
+}
+
+class OutboxRepository <<Repository>> {
+    - entityManager: EntityManagerInterface
+    + __construct(EntityManagerInterface $entityManager)
+    + save(OutboxEvent $event): void
+    + findPendingEvents(int $limit = 100): array<OutboxEvent>
+    + markAsProcessed(OutboxEvent $event): void
+    + markAsFailed(OutboxEvent $event, string $error): void
+    + deleteProcessedEvents(DateTimeImmutable $before): int
+}
+
+' Infrastructure Layer - Messaging
+class MessagePublisher <<Service>> {
+    - messageBus: MessageBusInterface
+    - logger: LoggerInterface
+    + __construct(MessageBusInterface $messageBus, LoggerInterface $logger)
+    + publish(object $message): void
+}
+
+' Presentation Layer - Controllers
+class AuthController <<Controller>> {
+    - registrationService: RegistrationService
+    - authenticationService: AuthenticationService
+    - tokenService: TokenService
+    - rateLimiter: RateLimiter
+    - validator: ValidatorInterface
+    - logger: LoggerInterface
+    + __construct(RegistrationService $registrationService, AuthenticationService $authenticationService, TokenService $tokenService, RateLimiter $rateLimiter, ValidatorInterface $validator, LoggerInterface $logger)
+    + register(Request $request): JsonResponse
+    + login(Request $request): JsonResponse
+    + refresh(Request $request): JsonResponse
+    + logout(Request $request): JsonResponse
+    + changePassword(Request $request): JsonResponse
+    - getRateLimitKey(Request $request, string $action): string
+    - getClientIp(Request $request): string
+}
+
+class HealthController <<Controller>> {
+    - entityManager: EntityManagerInterface
+    - cache: CacheInterface
+    + __construct(EntityManagerInterface $entityManager, CacheInterface $cache)
+    + check(): JsonResponse
+    + readiness(): JsonResponse
+    + liveness(): JsonResponse
+}
+
+' Relationships - Value Objects to Entity
+User *-- UserId : contains
+User *-- Email : contains
+User *-- Password : contains
+
+' Relationships - Entity to Enum
+OutboxEvent *-- OutboxStatus : has
+
+' Relationships - Services to Repositories
+RegistrationService --> IUserRepository : uses
+RegistrationService --> IOutboxRepository : uses
+RegistrationService --> User : creates
+RegistrationService --> OutboxEvent : creates
+RegistrationService --> RegisterUserDTO : receives
+
+AuthenticationService --> IUserRepository : uses
+AuthenticationService --> TokenService : uses
+AuthenticationService --> AuthenticationDTO : receives
+AuthenticationService --> TokenDTO : returns
+AuthenticationService --> ChangePasswordDTO : receives
+
+TokenService --> User : uses
+TokenService --> TokenDTO : returns
+TokenService --> IUserRepository : uses
+
+OutboxProcessor --> IOutboxRepository : uses
+OutboxProcessor --> CircuitBreaker : uses
+OutboxProcessor --> OutboxEvent : processes
+OutboxProcessor --> UserCreatedEvent : creates
+
+' Relationships - Repository Implementations
+IUserRepository <|.. UserRepository : implements
+IOutboxRepository <|.. OutboxRepository : implements
+
+' Relationships - Controllers to Services
+AuthController --> RegistrationService : uses
+AuthController --> AuthenticationService : uses
+AuthController --> TokenService : uses
+AuthController --> RateLimiter : uses
+
+' Relationships - Circuit Breaker
+CircuitBreaker *-- CircuitState : has
+
+' Relationships - Events
+UserCreatedEvent ..> User : created from
+UserAuthenticatedEvent ..> User : created from
+
+@enduml
