@@ -5,7 +5,7 @@ services:
     build:
       context: .
       dockerfile: docker/php/Dockerfile
-      target: production
+      target: development
     container_name: auth-service-php
     restart: unless-stopped
     working_dir: /var/www

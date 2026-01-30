@@ -35,8 +35,26 @@ COPY composer.json composer.lock symfony.lock ./
 # Install dependencies
 RUN composer install --no-dev --optimize-autoloader --no-scripts --no-interaction
 
-# Stage 2: Production
-FROM php:8.4-fpm-alpine
+# Stage 2: Development
+FROM builder AS development
+
+# Install Xdebug for development
+RUN pecl install xdebug-3.3.1 \
+    && docker-php-ext-enable xdebug
+
+# Configure Xdebug
+RUN echo "xdebug.mode=debug,coverage" >> /usr/local/etc/php/conf.d/docker-php-ext-xdebug.ini \
+    && echo "xdebug.client_host=host.docker.internal" >> /usr/local/etc/php/conf.d/docker-php-ext-xdebug.ini \
+    && echo "xdebug.start_with_request=yes" >> /usr/local/etc/php/conf.d/docker-php-ext-xdebug.ini
+
+WORKDIR /var/www
+
+EXPOSE 9000
+
+CMD ["php-fpm"]
+
+# Stage 3: Production
+FROM php:8.4-fpm-alpine AS production
 
 # Install only runtime libraries (no build tools)
 RUN apk add --no-cache \
