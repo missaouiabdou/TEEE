@@ -48,8 +48,8 @@ FROM builder AS development
 # Reinstall build deps for Xdebug
 RUN apk add --no-cache $PHPIZE_DEPS
 
-# Install Xdebug for development
-RUN pecl install xdebug-3.3.1 \
+# Install Xdebug for development (latest version compatible with PHP 8.4)
+RUN pecl install xdebug \
     && docker-php-ext-enable xdebug \
     && apk del $PHPIZE_DEPS \
     && rm -rf /tmp/pear /var/cache/apk/*
