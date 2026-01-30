@@ -45,13 +45,13 @@ RUN composer install --no-dev --optimize-autoloader --no-scripts --no-interactio
 # Stage 2: Development
 FROM builder AS development
 
-# Reinstall build deps for Xdebug
-RUN apk add --no-cache $PHPIZE_DEPS
+# Reinstall build deps for Xdebug (including linux-headers)
+RUN apk add --no-cache $PHPIZE_DEPS linux-headers
 
 # Install Xdebug for development (latest version compatible with PHP 8.4)
 RUN pecl install xdebug \
     && docker-php-ext-enable xdebug \
-    && apk del $PHPIZE_DEPS \
+    && apk del $PHPIZE_DEPS linux-headers \
     && rm -rf /tmp/pear /var/cache/apk/*
 
 # Configure Xdebug
