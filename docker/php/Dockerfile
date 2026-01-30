@@ -15,6 +15,7 @@ RUN apk add --no-cache \
 # Install PHP extensions
 RUN docker-php-ext-install -j$(nproc) \
         pdo_pgsql \
+        pgsql \
         intl \
         opcache \
         zip \
@@ -32,8 +33,8 @@ WORKDIR /var/www
 # Copy composer files
 COPY composer.json ./
 
-# Install dependencies
-RUN composer install --no-dev --optimize-autoloader --no-scripts --no-interaction
+# Install dependencies (ignore platform requirements during build)
+RUN composer install --no-dev --optimize-autoloader --no-scripts --no-interaction --ignore-platform-req=ext-pgsql
 
 # Stage 2: Development
 FROM builder AS development
