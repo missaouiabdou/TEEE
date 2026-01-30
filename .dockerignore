@@ -1,0 +1,50 @@
+# Git
+.git
+.gitignore
+.github
+
+# Documentation
+*.md
+docs/
+GUIDE_DEVELOPPEMENT.md
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# Tests
+tests/
+phpunit.xml
+
+# Cache and logs
+var/cache/*
+var/log/*
+var/sessions/*
+
+# Composer
+composer.lock
+vendor/
+
+# Environment
+.env.local
+.env.*.local
+
+# Node (if any)
+node_modules/
+package-lock.json
+
+# Docker
+docker-compose.yml
+Dockerfile
+.dockerignore
+
+# CI/CD
+.gitlab-ci.yml
+.travis.yml
+
+# Misc
+.DS_Store
+Thumbs.db
+*.log

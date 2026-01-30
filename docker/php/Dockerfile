@@ -25,6 +25,10 @@ RUN docker-php-ext-install -j$(nproc) \
 RUN pecl install amqp redis \
     && docker-php-ext-enable amqp redis
 
+# Clean up build dependencies to reduce image size
+RUN apk del $PHPIZE_DEPS \
+    && rm -rf /tmp/pear /var/cache/apk/*
+
 # Install Composer
 COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
 
@@ -34,14 +38,21 @@ WORKDIR /var/www
 COPY composer.json ./
 
 # Install dependencies (ignore platform requirements during build)
-RUN composer install --no-dev --optimize-autoloader --no-scripts --no-interaction --ignore-platform-req=ext-pgsql
+RUN composer install --no-dev --optimize-autoloader --no-scripts --no-interaction --ignore-platform-req=ext-pgsql \
+    && composer clear-cache \
+    && rm -rf /root/.composer/cache
 
 # Stage 2: Development
 FROM builder AS development
 
+# Reinstall build deps for Xdebug
+RUN apk add --no-cache $PHPIZE_DEPS
+
 # Install Xdebug for development
 RUN pecl install xdebug-3.3.1 \
-    && docker-php-ext-enable xdebug
+    && docker-php-ext-enable xdebug \
+    && apk del $PHPIZE_DEPS \
+    && rm -rf /tmp/pear /var/cache/apk/*
 
 # Configure Xdebug
 RUN echo "xdebug.mode=debug,coverage" >> /usr/local/etc/php/conf.d/docker-php-ext-xdebug.ini \
@@ -54,7 +65,7 @@ EXPOSE 9000
 
 CMD ["php-fpm"]
 
-# Stage 3: Production
+# Stage 3: Production (Ultra-optimized)
 FROM php:8.4-fpm-alpine AS production
 
 # Install only runtime libraries (no build tools)
@@ -62,7 +73,8 @@ RUN apk add --no-cache \
     postgresql-libs \
     libzip \
     icu-libs \
-    rabbitmq-c
+    rabbitmq-c \
+    && rm -rf /var/cache/apk/*
 
 # Copy PHP extensions from builder
 COPY --from=builder /usr/local/lib/php/extensions/ /usr/local/lib/php/extensions/
@@ -76,12 +88,22 @@ WORKDIR /var/www
 # Copy vendor from builder
 COPY --from=builder /var/www/vendor ./vendor
 
-# Copy application
-COPY . .
+# Copy application (exclude unnecessary files)
+COPY --chown=www-data:www-data bin ./bin
+COPY --chown=www-data:www-data config ./config
+COPY --chown=www-data:www-data migrations ./migrations
+COPY --chown=www-data:www-data public ./public
+COPY --chown=www-data:www-data src ./src
+COPY --chown=www-data:www-data templates ./templates
+COPY --chown=www-data:www-data .env ./
 
-# Set permissions
-RUN chown -R www-data:www-data /var/www \
-    && chmod -R 755 /var/www/var
+# Create necessary directories
+RUN mkdir -p var/cache var/log var/jwt \
+    && chown -R www-data:www-data var \
+    && chmod -R 755 var
+
+# Remove unnecessary files
+RUN rm -rf tests/ docs/ .git/ .github/ *.md
 
 EXPOSE 9000
 
