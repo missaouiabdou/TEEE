@@ -20,8 +20,8 @@ RUN docker-php-ext-install -j$(nproc) \
         zip \
         bcmath
 
-# Install PECL extensions
-RUN pecl install amqp-2.1.1 redis-6.0.2 \
+# Install PECL extensions (use latest versions compatible with PHP 8.4)
+RUN pecl install amqp redis \
     && docker-php-ext-enable amqp redis
 
 # Install Composer
